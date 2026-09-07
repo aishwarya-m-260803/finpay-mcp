@@ -10,6 +10,96 @@ const EXAMPLE_QUESTIONS = [
 const CHAT_API_URL = '/api/chat/'
 const FALLBACK_CHAT_API_URL = 'http://127.0.0.1:8000/api/chat/'
 
+function parseInline(text) {
+  if (!text) return null
+  const regex = /(\*\*\*.*?\*\*\*|\*\*.*?\*\*|\*.*?\*|`.*?`)/g
+  const parts = []
+  let lastIdx = 0
+  let match
+
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIdx) {
+      parts.push(text.substring(lastIdx, match.index))
+    }
+    const token = match[0]
+    if (token.startsWith('`') && token.endsWith('`')) {
+      parts.push(<code key={match.index}>{token.slice(1, -1)}</code>)
+    } else if (token.startsWith('***') && token.endsWith('***')) {
+      parts.push(<strong key={match.index}><em>{token.slice(3, -3)}</em></strong>)
+    } else if (token.startsWith('**') && token.endsWith('**')) {
+      parts.push(<strong key={match.index}>{token.slice(2, -2)}</strong>)
+    } else if (token.startsWith('*') && token.endsWith('*')) {
+      parts.push(<em key={match.index}>{token.slice(1, -1)}</em>)
+    } else {
+      parts.push(token)
+    }
+    lastIdx = regex.lastIndex
+  }
+
+  if (lastIdx < text.length) {
+    parts.push(text.substring(lastIdx))
+  }
+
+  return parts.length === 1 ? parts[0] : parts
+}
+
+function FormattedText({ content }) {
+  if (!content) return null
+
+  const lines = content.split('\n')
+  const elements = []
+  let listItems = []
+
+  const flushList = () => {
+    if (listItems.length > 0) {
+      elements.push(
+        <ul key={`ul-${elements.length}-${Math.random()}`}>
+          {listItems.map((item, idx) => (
+            <li key={idx}>{parseInline(item)}</li>
+          ))}
+        </ul>
+      )
+      listItems = []
+    }
+  }
+
+  lines.forEach((line, index) => {
+    const trimmed = line.trim()
+    if (!trimmed) {
+      flushList()
+      return
+    }
+
+    if (trimmed.startsWith('### ')) {
+      flushList()
+      elements.push(<h4 key={`h4-${index}`}>{parseInline(trimmed.replace(/^###\s+/, ''))}</h4>)
+    } else if (trimmed.startsWith('## ')) {
+      flushList()
+      elements.push(<h3 key={`h3-${index}`}>{parseInline(trimmed.replace(/^##\s+/, ''))}</h3>)
+    } else if (trimmed.startsWith('# ')) {
+      flushList()
+      elements.push(<h2 key={`h2-${index}`}>{parseInline(trimmed.replace(/^#\s+/, ''))}</h2>)
+    } else if (/^(\*+|-|•)\s+/.test(trimmed) || /^\*\*\*/.test(trimmed)) {
+      let itemText = trimmed
+      if (/^(\*+|-|•)\s+/.test(trimmed)) {
+        itemText = trimmed.replace(/^(\*+|-|•)\s+/, '')
+      } else if (/^\*\*\*/.test(trimmed)) {
+        itemText = trimmed.replace(/^\*\*\*/, '**')
+      }
+      listItems.push(itemText)
+    } else if (/^\d+\.\s+/.test(trimmed)) {
+      listItems.push(trimmed.replace(/^\d+\.\s+/, ''))
+    } else {
+      flushList()
+      elements.push(<p key={`p-${index}`}>{parseInline(trimmed)}</p>)
+    }
+  })
+
+  flushList()
+
+  return <div className="formatted-markdown">{elements}</div>
+}
+
 export default function App() {
   const [inputQuery, setInputQuery] = useState('')
   const [messages, setMessages] = useState([])
@@ -39,18 +129,25 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         })
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
       } catch (err) {
         res = await fetch(FALLBACK_CHAT_API_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         })
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
       }
 
-      const json = await res.json()
-      const responseText = json.response || json.error || 'No response received.'
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok || json.success === false) {
+        // Backend returns structured: {success, error_type, message, details, category}
+        const errorObj = new Error(json.message || json.error || `Server error (${res.status})`)
+        errorObj.category = json.category || 'unhandled'
+        errorObj.errorType = json.error_type || 'UnknownError'
+        errorObj.details = json.details || ''
+        throw errorObj
+      }
+
+      const responseText = json.response || 'No response received.'
 
       const assistantMessage = {
         id: Date.now() + 1,
@@ -66,7 +163,8 @@ export default function App() {
         {
           id: Date.now() + 1,
           sender: 'assistant',
-          text: 'Sorry, I encountered an error querying your financial data.',
+          text: err.message || 'Sorry, I encountered an error querying your financial data.',
+          errorCategory: err.category || 'unhandled',
         },
       ])
     } finally {
@@ -165,9 +263,15 @@ export default function App() {
             {messages.map((msg) => (
               <div key={msg.id} className={`message-item ${msg.sender}`}>
                 <div className="avatar">
-                  {msg.sender === 'user' ? 'AS' : 'AI'}
+                  {msg.sender === 'user' ? 'AS' : msg.errorCategory ? '⚠' : 'AI'}
                 </div>
-                <div className="bubble">{msg.text}</div>
+                <div className={`bubble${msg.errorCategory ? ` error-bubble error-${msg.errorCategory}` : ''}`}>
+                  {msg.sender === 'assistant' ? (
+                    <FormattedText content={msg.text} />
+                  ) : (
+                    msg.text
+                  )}
+                </div>
               </div>
             ))}
 

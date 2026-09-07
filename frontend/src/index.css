@@ -335,6 +335,57 @@ main {
   border-top-left-radius: 4px;
 }
 
+/* Formatted Markdown Styles */
+.formatted-markdown h2,
+.formatted-markdown h3,
+.formatted-markdown h4 {
+  color: var(--accent-primary);
+  margin-top: 0.65rem;
+  margin-bottom: 0.4rem;
+  font-weight: 700;
+}
+
+.formatted-markdown h4 {
+  font-size: 0.95rem;
+}
+
+.formatted-markdown h3 {
+  font-size: 1.05rem;
+}
+
+.formatted-markdown h2 {
+  font-size: 1.2rem;
+}
+
+.formatted-markdown p {
+  margin: 0.25rem 0;
+  line-height: 1.55;
+}
+
+.formatted-markdown ul {
+  margin: 0.4rem 0 0.4rem 1.25rem;
+  padding: 0;
+}
+
+.formatted-markdown li {
+  margin-bottom: 0.35rem;
+  line-height: 1.5;
+}
+
+.formatted-markdown strong {
+  color: #FFFFFF;
+  font-weight: 700;
+}
+
+.formatted-markdown code {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 0.875em;
+  color: var(--accent-secondary);
+}
+
 /* Loading Dots */
 .loading-bubble {
   display: flex;
@@ -375,4 +426,43 @@ footer {
   border-top: 1px solid var(--border-color);
   color: var(--text-secondary);
   font-size: 0.825rem;
+}
+
+/* ── Error Bubble Styles ──────────────────────────────────── */
+
+.error-bubble {
+  border-left: 3px solid;
+  padding-left: 1.1rem;
+}
+
+/* Category 1: API Quota / Key Exhaustion — amber */
+.error-quota {
+  background-color: rgba(245, 158, 11, 0.08) !important;
+  border-left-color: #F59E0B !important;
+  border-color: rgba(245, 158, 11, 0.25) !important;
+}
+
+/* Category 2: MCP Boundary Violation — red */
+.error-boundary {
+  background-color: rgba(239, 68, 68, 0.08) !important;
+  border-left-color: #EF4444 !important;
+  border-color: rgba(239, 68, 68, 0.25) !important;
+}
+
+/* Category 3: Parameter Mismatch — orange */
+.error-parameter {
+  background-color: rgba(249, 115, 22, 0.08) !important;
+  border-left-color: #F97316 !important;
+  border-color: rgba(249, 115, 22, 0.25) !important;
+}
+
+/* Category 4: Unhandled / Technical Fault — muted red */
+.error-unhandled {
+  background-color: rgba(185, 28, 28, 0.08) !important;
+  border-left-color: #B91C1C !important;
+  border-color: rgba(185, 28, 28, 0.25) !important;
+}
+
+.error-bubble .formatted-markdown strong {
+  color: inherit;
 }

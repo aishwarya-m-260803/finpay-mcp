@@ -49,16 +49,30 @@ class MCPClientManager:
         """Dynamically list all tools registered on the MCP server."""
         if not self.session:
             raise RuntimeError("MCP client is not connected")
-        response = await self.session.list_tools()
-        return response.tools
+        try:
+            response = await self.session.list_tools()
+            return response.tools
+        except Exception as e:
+            raise RuntimeError(f"MCP list_tools failed: {e}") from e
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
-        """Call an MCP tool by name with arguments and return the result."""
+        """Call an MCP tool by name with arguments and return the result.
+
+        Defensively wraps the session call so that database errors,
+        parameter mismatches, or MCP protocol errors are caught here
+        instead of escaping into the stdio_client TaskGroup (which would
+        wrap them in an opaque ExceptionGroup).
+        """
         if not self.session:
             raise RuntimeError("MCP client is not connected")
-        
-        result = await self.session.call_tool(tool_name, arguments)
-        
+
+        try:
+            result = await self.session.call_tool(tool_name, arguments)
+        except Exception as e:
+            raise RuntimeError(
+                f"MCP tool '{tool_name}' execution failed: {e}"
+            ) from e
+
         # Extract text content items from result
         texts = []
         if hasattr(result, "content"):
@@ -67,11 +81,12 @@ class MCPClientManager:
                     texts.append(content_item.text)
                 elif hasattr(content_item, "text"):
                     texts.append(content_item.text)
-        
+
         raw_output = "\n".join(texts) if texts else str(result)
-        
+
         # Attempt to parse output as JSON if possible
         try:
             return json.loads(raw_output)
         except (json.JSONDecodeError, TypeError):
             return raw_output
+

@@ -15,6 +15,29 @@ from client.mcp_client import MCPClientManager
 
 load_dotenv()
 
+
+# ── Structured MCP Error Classes ─────────────────────────────
+
+class MCPQuotaError(Exception):
+    """Category 1: API Quota or Key Exhaustion (429, rate limit, auth failure)."""
+    pass
+
+
+class MCPBoundaryError(Exception):
+    """Category 2: MCP Boundary & Rule Violations (cross-tenant, restricted actions)."""
+    pass
+
+
+class MCPParameterError(Exception):
+    """Category 3: Parameter Mismatch / Missing Filter."""
+    pass
+
+
+class MCPToolError(Exception):
+    """Category 4: Unhandled Tool Exception."""
+    pass
+
+
 SYSTEM_INSTRUCTION = (
     "You are FinPay AI Assistant, a helpful financial intelligence agent backed by PostgreSQL. "
     "Use the provided MCP tools to search customers, view accounts, list transactions, "
@@ -51,7 +74,11 @@ class LLMRunner:
 
     async def run(self, user_query: str, mcp_client: MCPClientManager) -> str:
         """Execute user query using dynamic MCP tools in an LLM agent loop."""
-        mcp_tools = await mcp_client.list_tools()
+        try:
+            mcp_tools = await mcp_client.list_tools()
+        except Exception as e:
+            raise MCPToolError(f"MCP server connection failed: {str(e)}") from e
+
         self.logger(f"[MCP] Discovered {len(mcp_tools)} tools: {[t.name for t in mcp_tools]}")
 
         if self.provider == "openai":
@@ -61,7 +88,7 @@ class LLMRunner:
         elif self.provider == "anthropic":
             return await self._run_anthropic(user_query, mcp_tools, mcp_client)
         else:
-            raise NotImplementedError(f"Provider {self.provider} not supported")
+            raise MCPToolError(f"Provider {self.provider} not supported")
 
     async def _run_openai(
         self, user_query: str, mcp_tools: list[Any], mcp_client: MCPClientManager
@@ -89,12 +116,20 @@ class LLMRunner:
         ]
 
         while True:
-            response = client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                tools=tools,
-                temperature=0.1,
-            )
+            try:
+                response = client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages,
+                    tools=tools,
+                    temperature=0.1,
+                )
+            except Exception as e:
+                err_msg = str(e)
+                if any(k in err_msg.lower() for k in ["429", "rate_limit", "rate limit", "quota", "insufficient_quota"]):
+                    raise MCPQuotaError(f"RESOURCE_EXHAUSTED: {err_msg}") from e
+                if any(k in err_msg.lower() for k in ["authentication", "invalid key", "api_key", "forbidden", "permission denied"]):
+                    raise MCPQuotaError(f"AUTH_FAILURE: {err_msg}") from e
+                raise MCPToolError(err_msg) from e
 
             choice = response.choices[0]
             msg = choice.message
@@ -110,7 +145,10 @@ class LLMRunner:
                 fn_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
 
                 self.logger(f"[MCP Tool Exec] Executing {fn_name}({fn_args})...")
-                result = await mcp_client.call_tool(fn_name, fn_args)
+                try:
+                    result = await mcp_client.call_tool(fn_name, fn_args)
+                except Exception as e:
+                    raise MCPToolError(f"MCP tool '{fn_name}' failed: {str(e)}") from e
                 self.logger(f"[MCP Tool Result] Received output from {fn_name}")
 
                 result_str = json.dumps(result) if not isinstance(result, str) else result
@@ -148,12 +186,43 @@ class LLMRunner:
 
         contents = [user_query]
 
+        # Model fallback cascade if rate limited / quota exhausted / model deprecated
+        candidate_models = []
+        for m in [self.model_name, "gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite"]:
+            if m and m not in candidate_models:
+                candidate_models.append(m)
+
+        def _call_generate_with_fallback(current_contents):
+            last_exc = None
+            for model in candidate_models:
+                try:
+                    return client.models.generate_content(
+                        model=model,
+                        contents=current_contents,
+                        config=config,
+                    )
+                except Exception as e:
+                    err_msg = str(e)
+                    # Skip to next model on rate limits, quota exhaustion, or deprecated/retired models
+                    if any(k in err_msg for k in [
+                        "429", "RESOURCE_EXHAUSTED", "Quota", "quota", "LimitExceeded",
+                        "404", "NOT_FOUND", "no longer available", "deprecated",
+                    ]):
+                        self.logger(f"[Gemini Fallback] Model {model} unavailable ({err_msg[:80]}...). Trying next...")
+                        last_exc = e
+                        continue
+                    # Re-raise non-quota errors with structured types
+                    if any(k in err_msg.lower() for k in ["invalid key", "api_key", "authentication", "forbidden", "permission denied"]):
+                        raise MCPQuotaError(f"RESOURCE_EXHAUSTED: {err_msg}") from e
+                    raise MCPToolError(err_msg) from e
+            if last_exc:
+                raise MCPQuotaError(
+                    f"RESOURCE_EXHAUSTED: All fallback models exhausted. "
+                    f"Last error: {str(last_exc)}"
+                ) from last_exc
+
         while True:
-            response = client.models.generate_content(
-                model=self.model_name,
-                contents=contents,
-                config=config,
-            )
+            response = _call_generate_with_fallback(contents)
 
             if not response.function_calls:
                 return response.text or "No answer provided."
@@ -166,7 +235,10 @@ class LLMRunner:
                 tool_args = dict(call.args) if call.args else {}
 
                 self.logger(f"[MCP Tool Exec] Executing {tool_name}({tool_args})...")
-                result = await mcp_client.call_tool(tool_name, tool_args)
+                try:
+                    result = await mcp_client.call_tool(tool_name, tool_args)
+                except Exception as e:
+                    raise MCPToolError(f"MCP tool '{tool_name}' failed: {str(e)}") from e
                 self.logger(f"[MCP Tool Result] Received output from {tool_name}")
 
                 contents.append(
@@ -196,13 +268,21 @@ class LLMRunner:
         claude_model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
 
         while True:
-            response = client.messages.create(
-                model=claude_model,
-                system=SYSTEM_INSTRUCTION,
-                messages=messages,
-                tools=tools,
-                max_tokens=2048,
-            )
+            try:
+                response = client.messages.create(
+                    model=claude_model,
+                    system=SYSTEM_INSTRUCTION,
+                    messages=messages,
+                    tools=tools,
+                    max_tokens=2048,
+                )
+            except Exception as e:
+                err_msg = str(e)
+                if any(k in err_msg.lower() for k in ["429", "rate_limit", "rate limit", "quota", "overloaded"]):
+                    raise MCPQuotaError(f"RESOURCE_EXHAUSTED: {err_msg}") from e
+                if any(k in err_msg.lower() for k in ["authentication", "invalid key", "api_key", "forbidden", "permission denied"]):
+                    raise MCPQuotaError(f"AUTH_FAILURE: {err_msg}") from e
+                raise MCPToolError(err_msg) from e
 
             messages.append({"role": "assistant", "content": response.content})
 
@@ -217,7 +297,10 @@ class LLMRunner:
                     tool_args = block.input or {}
 
                     self.logger(f"[MCP Tool Exec] Executing {tool_name}({tool_args})...")
-                    result = await mcp_client.call_tool(tool_name, tool_args)
+                    try:
+                        result = await mcp_client.call_tool(tool_name, tool_args)
+                    except Exception as e:
+                        raise MCPToolError(f"MCP tool '{tool_name}' failed: {str(e)}") from e
                     self.logger(f"[MCP Tool Result] Received output from {tool_name}")
 
                     result_str = json.dumps(result) if not isinstance(result, str) else result
