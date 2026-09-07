@@ -1,0 +1,4 @@
+openai>=1.0.0
+mcp<2
+python-dotenv
+asyncpg
