@@ -218,7 +218,8 @@ async def run_tests():
         os.environ.setdefault("DJANGO_SETTINGS_MODULE", "finpay.settings")
         import django
         django.setup()
-        from dashboard.api_views import _sanitize_error
+        from dashboard.api_views import _sanitize_error  # type: ignore[import]
+
         raw_secret_err = "Failed to connect to http://172.16.0.249:11434 with key AQ.123456789 and postgresql://user:pass@localhost:5432/db"
         sanitized = _sanitize_error(raw_secret_err)
         no_ip = "172.16.0.249" not in sanitized

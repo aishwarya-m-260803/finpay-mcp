@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import sys
 from pathlib import Path
+from typing import Optional
 
 from asgiref.sync import async_to_sync
 from django.conf import settings
@@ -9,6 +12,13 @@ from rest_framework.response import Response
 
 from .models import Account, Customer, Transaction
 from .serializers import AccountSerializer, CustomerSerializer, TransactionSerializer
+
+# Safe fallback for BaseExceptionGroup across Python versions
+try:
+    _ExceptionGroupType: tuple[type[BaseException], ...] = (BaseExceptionGroup,)
+except NameError:
+    _ExceptionGroupType = ()
+
 
 
 @api_view(['GET'])
@@ -202,16 +212,12 @@ def _unwrap_exception_group(exc: BaseException) -> BaseException:
     and returns the actual sub-exception so the error classifier can
     inspect the real error string.
     """
-    # Python 3.11+ ExceptionGroup inherits from BaseException
     while True:
-        if isinstance(exc, BaseExceptionGroup):
-            # Pick the first sub-exception (there's almost always just one)
-            sub_exceptions = exc.exceptions
+        if _ExceptionGroupType and isinstance(exc, _ExceptionGroupType):
+            sub_exceptions = getattr(exc, "exceptions", [])
             if sub_exceptions:
                 exc = sub_exceptions[0]
                 continue
-        # Also handle the older-style __cause__ / __context__ chains
-        # in case the group itself wraps via `raise ... from ...`
         break
     return exc
 
@@ -274,15 +280,17 @@ def api_chat(request):
             if p not in sys.path:
                 sys.path.insert(0, p)
 
-        from agent import FinPayAgent
+        from agent import FinPayAgent  # type: ignore[import]
 
-        async def _execute_agent_query(prompt: str, history_list: list | None) -> str:
+
+        async def _execute_agent_query(prompt: str, history_list: Optional[list] = None) -> str:
             """Delegate to FinPayAgent — all AI + MCP logic lives in ai-agent/."""
             agent = FinPayAgent()
             try:
                 return await agent.run_with_mcp(prompt, history=history_list)
             except BaseException as inner_exc:
                 # Unwrap ExceptionGroup *inside* the async function
+
                 # so we re-raise the real root cause as a plain Exception
                 root = _unwrap_exception_group(inner_exc)
                 if root is not inner_exc:
