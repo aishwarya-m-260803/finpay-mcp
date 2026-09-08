@@ -23,20 +23,32 @@ from agent import FinPayAgent
 
 async def single_query(prompt: str) -> None:
     """Run a single query through the agent."""
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     agent = FinPayAgent()
     answer = await agent.run_with_mcp(prompt)
-    print("\n" + "─" * 50)
-    print(f"💬 Answer:\n\n{answer}")
+    print("\n" + "-" * 50)
+    print(f"Answer:\n\n{answer}")
 
 
 async def interactive() -> None:
-    """Run an interactive REPL loop."""
+    """Run an interactive REPL loop with conversation context."""
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
     print("Type 'exit' or 'quit' to end.\n")
     agent = FinPayAgent()
+    history = []
 
     while True:
         try:
-            prompt = input("Ask FinPay › ").strip()
+            prompt = input("Ask FinPay > ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye!")
             break
@@ -46,10 +58,13 @@ async def interactive() -> None:
             break
 
         try:
-            answer = await agent.run_with_mcp(prompt)
+            answer = await agent.run_with_mcp(prompt, history=history)
             print(f"\n{answer}\n")
+            history.append({"role": "user", "content": prompt})
+            history.append({"role": "assistant", "content": answer})
         except Exception as e:
-            print(f"\n❌ Error: {e}\n")
+            print(f"\nError: {e}\n")
+
 
 
 async def main() -> None:

@@ -72,13 +72,27 @@ def api_transaction_list(request):
 
 
 def _sanitize_error(error_msg: str) -> str:
-    """Strip API keys and secrets from error messages."""
+    """Strip API keys, IP addresses, URLs, and DB credentials from error messages."""
     import re
-    return re.sub(
+    # Redact API keys
+    msg = re.sub(
         r'(?:AQ\.[A-Za-z0-9_\-]+|AIza[0-9A-Za-z-_]{35}|sk-[A-Za-z0-9]{32,})',
-        '[REDACTED]',
+        '[REDACTED_KEY]',
         error_msg,
     )
+    # Redact HTTP URLs and IPs
+    msg = re.sub(
+        r'http://[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}(:[0-9]+)?',
+        '[REDACTED_URL]',
+        msg,
+    )
+    # Redact PostgreSQL connection strings
+    msg = re.sub(
+        r'postgres(ql)?://[^\s]+',
+        '[REDACTED_DB_URL]',
+        msg,
+    )
+    return msg
 
 
 def _classify_error(sanitized_msg: str) -> tuple[str, str]:
@@ -90,7 +104,7 @@ def _classify_error(sanitized_msg: str) -> tuple[str, str]:
         1. quota       — API Quota or Key Exhaustion (429, rate limit, auth)
         2. boundary    — MCP Boundary & Rule Violations (cross-tenant, restricted)
         3. parameter   — Parameter Mismatch / Missing Filter
-        4. unhandled   — Unhandled Tool Exception (fallback)
+        4. unhandled   — Unhandled Tool / Service Exception (fallback)
     """
     msg_lower = sanitized_msg.lower()
 
@@ -120,7 +134,6 @@ def _classify_error(sanitized_msg: str) -> tuple[str, str]:
         "drop table", "create table", "truncate",
     ]
     if any(kw in msg_lower for kw in boundary_keywords):
-        # Extract a specific reason fragment when possible
         reason = "Operation falls outside the permitted MCP scope."
         if "cross-tenant" in msg_lower or "cross_tenant" in msg_lower:
             reason = "Cross-tenant querying is restricted."
@@ -139,7 +152,21 @@ def _classify_error(sanitized_msg: str) -> tuple[str, str]:
             f"- **Permitted Scope:** You can only query records associated with your active session.",
         )
 
-    # ── Category 3: Parameter Mismatch / Missing Filter ──────
+    # ── Category 3: Connection & Timeout Errors ──────────────
+    conn_keywords = [
+        "connecterror", "connection refused", "connecttimeout",
+        "readtimeout", "timeout", "timed out", "endpoint",
+        "name resolution", "gaierror", "httpx", "mcp list_tools failed",
+        "mcp client is not connected", "connection failed",
+    ]
+    if any(kw in msg_lower for kw in conn_keywords):
+        return (
+            "unhandled",
+            "**Service Alert:** Unable to connect to the AI model or MCP backend service. "
+            "Please check network connectivity or try again later.",
+        )
+
+    # ── Category 4: Parameter Mismatch / Missing Filter ──────
     param_keywords = [
         "missing", "required", "invalid parameter", "invalid_parameter",
         "missing filter", "column", "does not exist", "type error",
@@ -154,12 +181,13 @@ def _classify_error(sanitized_msg: str) -> tuple[str, str]:
             f"missing or invalid parameters. {sanitized_msg}",
         )
 
-    # ── Category 4: Unhandled Tool Exception (fallback) ──────
+    # ── Category 5: Unhandled Exception (fallback) ───────────
     return (
         "unhandled",
         f"**Technical Fault:** The query failed to execute due to an internal "
         f"server error: {sanitized_msg}",
     )
+
 
 
 def _unwrap_exception_group(exc: BaseException) -> BaseException:
@@ -188,10 +216,17 @@ def _unwrap_exception_group(exc: BaseException) -> BaseException:
     return exc
 
 
+MAX_MESSAGE_LENGTH = 2000
+MAX_HISTORY_ITEMS = 20
+
+
 @api_view(['POST'])
 def api_chat(request):
-    """POST /api/chat/ -> delegates to ai-agent (Qwen + MCP), returns {"response": "<final AI answer>"}."""
-    message = request.data.get('message') if isinstance(request.data, dict) else None
+    """POST /api/chat/ -> delegates to ai-agent (Qwen + MCP), returns {"success": true, "response": "<final AI answer>"}."""
+    data = request.data if isinstance(request.data, dict) else {}
+    message = data.get('message')
+    raw_history = data.get('history')
+
     if not message or not str(message).strip():
         return Response(
             {
@@ -204,6 +239,32 @@ def api_chat(request):
         )
 
     clean_message = str(message).strip()
+    if len(clean_message) > MAX_MESSAGE_LENGTH:
+        return Response(
+            {
+                'success': False,
+                'error_type': 'ValidationError',
+                'message': f'Message exceeds maximum allowed length of {MAX_MESSAGE_LENGTH} characters.',
+                'details': f'Received {len(clean_message)} characters.',
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Validate and sanitize conversation history
+    history = None
+    if isinstance(raw_history, list):
+        clean_history = []
+        for item in raw_history[:MAX_HISTORY_ITEMS]:
+            if isinstance(item, dict):
+                role = str(item.get('role', '')).strip().lower()
+                content = str(item.get('content', '')).strip()
+                if role in ('user', 'assistant') and content:
+                    clean_history.append({
+                        'role': role,
+                        'content': content[:MAX_MESSAGE_LENGTH]
+                    })
+        history = clean_history if clean_history else None
+
 
     try:
         # Ensure project root and ai-agent dir are in sys.path
@@ -215,11 +276,11 @@ def api_chat(request):
 
         from agent import FinPayAgent
 
-        async def _execute_agent_query(prompt: str) -> str:
+        async def _execute_agent_query(prompt: str, history_list: list | None) -> str:
             """Delegate to FinPayAgent — all AI + MCP logic lives in ai-agent/."""
             agent = FinPayAgent()
             try:
-                return await agent.run_with_mcp(prompt)
+                return await agent.run_with_mcp(prompt, history=history_list)
             except BaseException as inner_exc:
                 # Unwrap ExceptionGroup *inside* the async function
                 # so we re-raise the real root cause as a plain Exception
@@ -228,8 +289,10 @@ def api_chat(request):
                     raise type(root)(str(root)) from root
                 raise
 
-        ai_response = async_to_sync(_execute_agent_query)(clean_message)
+
+        ai_response = async_to_sync(_execute_agent_query)(clean_message, history)
         return Response({'success': True, 'response': ai_response})
+
 
     except BaseException as e:
         # ── Step 1: Unwrap ExceptionGroup if present ──────────

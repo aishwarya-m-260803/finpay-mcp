@@ -235,6 +235,36 @@ async def get_transaction(transaction_id: int) -> dict[str, Any]:
 
 
 @mcp.tool()
+async def search_merchants(query: str) -> list[dict[str, Any]] | dict[str, Any]:
+    """Search merchants by merchant name or category using partial matching.
+
+    Args:
+        query: Search term to match against merchant_name or category.
+
+    Returns:
+        Structured array of matching merchant records or message object.
+    """
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT merchant_id, merchant_name, category, city
+                FROM   merchants
+                WHERE  merchant_name ILIKE $1
+                   OR  category      ILIKE $1
+                ORDER BY merchant_id
+                """,
+                f"%{query}%",
+            )
+        if not rows:
+            return {"message": f"No merchants matching '{query}'", "merchants": []}
+        return _serialize_list(rows)
+    except Exception as e:
+        return {"error": f"Database query failed: {str(e)}"}
+
+
+@mcp.tool()
 async def get_merchant_transactions(
     merchant_id: int, limit: int = 50
 ) -> list[dict[str, Any]] | dict[str, Any]:
@@ -325,11 +355,14 @@ async def get_transaction_summary(
         """
 
         async with pool.acquire() as conn:
+            acc_row = await conn.fetchrow("SELECT currency FROM accounts WHERE account_id = $1", account_id)
+            curr = acc_row["currency"] if acc_row and "currency" in acc_row else "INR"
             rows = await conn.fetch(query, *params)
 
         if not rows:
             return {
                 "account_id": account_id,
+                "currency": curr,
                 "date_range": {"start_date": start_date, "end_date": end_date},
                 "message": "No successful transactions found for the specified criteria",
                 "by_transaction_type": [],
@@ -342,8 +375,10 @@ async def get_transaction_summary(
 
         return {
             "account_id": account_id,
+            "currency": curr,
             "date_range": {"start_date": start_date, "end_date": end_date},
             "overall_summary": {
+                "currency": curr,
                 "total_transactions": total_count,
                 "total_amount": total_sum,
                 "average_amount": overall_avg,
@@ -352,6 +387,7 @@ async def get_transaction_summary(
         }
     except Exception as e:
         return {"error": f"Database query failed: {str(e)}"}
+
 
 
 # ── entry point ──────────────────────────────────────────────

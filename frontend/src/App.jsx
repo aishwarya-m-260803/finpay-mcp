@@ -116,13 +116,23 @@ export default function App() {
       text: trimmed,
     }
 
+    const historyPayload = messages
+      .filter((msg) => !msg.errorCategory && (msg.sender === 'user' || msg.sender === 'assistant'))
+      .map((msg) => ({
+        role: msg.sender === 'user' ? 'user' : 'assistant',
+        content: msg.text,
+      }))
+
     setMessages((prev) => [...prev, userMessage])
     setInputQuery('')
     setLoading(true)
 
     try {
       let res
-      const payload = { message: trimmed }
+      const payload = {
+        message: trimmed,
+        history: historyPayload,
+      }
       try {
         res = await fetch(CHAT_API_URL, {
           method: 'POST',
@@ -136,6 +146,7 @@ export default function App() {
           body: JSON.stringify(payload),
         })
       }
+
 
       const json = await res.json().catch(() => ({}))
       if (!res.ok || json.success === false) {

@@ -39,6 +39,7 @@ class QwenClient:
         temperature: Optional[float] = None,
         num_ctx: Optional[int] = None,
         num_predict: Optional[int] = None,
+        timeout: Optional[float] = None,
     ):
         self.base_url = (
             base_url
@@ -54,6 +55,9 @@ class QwenClient:
         self.num_predict = num_predict if num_predict is not None else int(
             os.getenv("OLLAMA_NUM_PREDICT", "1024")
         )
+        self.timeout = timeout if timeout is not None else float(
+            os.getenv("OLLAMA_TIMEOUT", "120.0")
+        )
 
         self.chat_url = f"{self.base_url}/api/chat"
 
@@ -67,7 +71,7 @@ class QwenClient:
         """Synchronous chat completion via Ollama /api/chat."""
         payload = self._build_payload(messages, tools)
 
-        with httpx.Client(timeout=120.0) as client:
+        with httpx.Client(timeout=self.timeout) as client:
             resp = client.post(self.chat_url, json=payload)
             resp.raise_for_status()
             return resp.json()
@@ -82,10 +86,11 @@ class QwenClient:
         """Asynchronous chat completion via Ollama /api/chat."""
         payload = self._build_payload(messages, tools)
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(self.chat_url, json=payload)
             resp.raise_for_status()
             return resp.json()
+
 
     # ── payload builder ──────────────────────────────────────
 
