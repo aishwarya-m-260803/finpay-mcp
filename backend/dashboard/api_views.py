@@ -190,7 +190,7 @@ def _unwrap_exception_group(exc: BaseException) -> BaseException:
 
 @api_view(['POST'])
 def api_chat(request):
-    """POST /api/chat/ -> accepts {"message": "..."}, runs Gemini + MCP tools via client, returns {"response": "<final AI answer>"}."""
+    """POST /api/chat/ -> delegates to ai-agent (Qwen + MCP), returns {"response": "<final AI answer>"}."""
     message = request.data.get('message') if isinstance(request.data, dict) else None
     if not message or not str(message).strip():
         return Response(
@@ -206,20 +206,20 @@ def api_chat(request):
     clean_message = str(message).strip()
 
     try:
-        # Ensure project root is in sys.path so client module imports cleanly
+        # Ensure project root and ai-agent dir are in sys.path
         project_root = Path(settings.BASE_DIR).parent
-        if str(project_root) not in sys.path:
-            sys.path.insert(0, str(project_root))
+        ai_agent_dir = project_root / "ai-agent"
+        for p in [str(project_root), str(ai_agent_dir)]:
+            if p not in sys.path:
+                sys.path.insert(0, p)
 
-        from client.llm_runner import LLMRunner
-        from client.mcp_client import MCPClientManager
+        from agent import FinPayAgent
 
-        async def _execute_mcp_llm_query(prompt: str) -> str:
-            mcp_client = MCPClientManager()
+        async def _execute_agent_query(prompt: str) -> str:
+            """Delegate to FinPayAgent — all AI + MCP logic lives in ai-agent/."""
+            agent = FinPayAgent()
             try:
-                async with mcp_client.connect():
-                    runner = LLMRunner()
-                    return await runner.run(prompt, mcp_client)
+                return await agent.run_with_mcp(prompt)
             except BaseException as inner_exc:
                 # Unwrap ExceptionGroup *inside* the async function
                 # so we re-raise the real root cause as a plain Exception
@@ -228,7 +228,7 @@ def api_chat(request):
                     raise type(root)(str(root)) from root
                 raise
 
-        ai_response = async_to_sync(_execute_mcp_llm_query)(clean_message)
+        ai_response = async_to_sync(_execute_agent_query)(clean_message)
         return Response({'success': True, 'response': ai_response})
 
     except BaseException as e:
